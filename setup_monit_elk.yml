@@ -1,0 +1,163 @@
+---
+- name: Setup new Server
+  hosts: devdemo
+  vars_files:
+    - vars/ops
+  tasks:
+    - name: Ensure GPG key for filebeat exists on CentOS
+      rpm_key:
+        key: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        state: present
+      when: ansible_facts['distribution'] == "CentOS"
+      tags: gpgimport
+
+    - name: Ensure filebeat repository is exists on CentOS
+      yum_repository:
+        name: ELK-REPO
+        description: ELK-REPO
+        file: filebeat_repo
+        baseurl: https://artifacts.elastic.co/packages/8.x/yum
+        gpgkey: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        gpgcheck: yes
+        enabled: true
+        state: present
+      when: ansible_facts['distribution'] == "CentOS"
+      tags: repoimport
+
+    - name: Ensure filebeat is installed on CentOS
+      yum:
+        name: filebeat-8.9.0-1.x86_64
+        state: present
+      when: ansible_facts['distribution'] == "CentOS"
+      tags: installpkg
+
+    - name: Ensure directory for CA is exists
+      file:
+        path: /etc/filebeat/certs/ca
+        state: directory
+      tags: createdir
+
+    - name: Ensure CA ELK is exists
+      copy: 
+        src: files/elk/isrgrootx1.pem
+        dest: /etc/filebeat/certs/ca/isrgrootx1.pem
+        force: yes
+      tags: importca
+
+    - name: Backup existing config
+      copy:
+        src: /etc/filebeat/filebeat.yml
+        dest: /etc/filebeat/filebeat.yml.bak
+        remote_src: true
+        force: true
+      tags: backupconfig
+
+    - name: Ensure filebeat config file exits
+      copy:
+        src: files/elk/filebeat.yml
+        dest: /etc/filebeat/filebeat.yml
+        force: true
+      tags: copyconfig
+
+    - name: Ensure module1 available
+      copy:
+        src: /etc/filebeat/modules.d/system.yml.disabled
+        dest: /etc/filebeat/modules.d/system.yml
+        remote_src: true
+        force: true
+      tags: module1
+
+    - name: Ensure module2 available
+      copy:
+        src: /etc/filebeat/modules.d/auditd.yml.disabled
+        dest: /etc/filebeat/modules.d/auditd.yml
+        remote_src: true
+        force: true
+      tags: module2
+
+    - name: Ensure module1 configured
+      copy:
+        src: files/elk/system.yml 
+        dest: /etc/filebeat/modules.d/system.yml
+        force: true
+      tags: copymodule1
+
+    - name: Ensure module2 configured
+      copy:
+        src: files/elk/auditd.yml
+        dest: /etc/filebeat/modules.d/auditd.yml
+        force: true
+      tags: copymodule2
+
+#    - name: Ensure all module files are configured
+#      lineinfile:
+#        path: /etc/filebeat/modules.d/{{ item }}
+#        regexp: 'enabled: false'
+#        line: '    enabled: true'
+#      loop: "{{ elkfiles }}"
+#      tags: moduleconfig
+
+    - name: Ensure all system module active
+      shell: filebeat modules enable system
+      args:
+        executable: /bin/bash
+      tags: sysmod
+
+    - name: Ensure all audit module active
+      shell: filebeat modules enable auditd
+      args:
+        executable: /bin/bash
+      tags: audmod
+
+    - name: Setup filebeat for system module
+      shell: filebeat setup --pipelines --modules system -M 'system.syslog.enabled=true' -M 'system.syslog.var.paths= ["/var/log/anaconda/syslog"]' -M 'system.auth.enabled=true' -M 'system.auth.var.paths=["/var/log/secure"]'
+      args:
+        executable: /bin/bash
+      tags: setupsys
+
+    - name: Setup filebeat for auditd module
+      shell: filebeat setup --pipelines --modules auditd -M 'auditd.log.enabled=true' -M 'auditd.log.var.paths= ["/var/log/audit*"]'
+      args:
+        executable: /bin/bash
+      tags: setupaud
+
+    - name: Ensure filebeat are enabled
+      service:
+        name: filebeat
+        state: started
+        enabled: true
+      tags: startfb
+
+    - name: Ensure hosts reach to domain
+      lineinfile:
+        path: /etc/hosts
+        state: present
+        line: 10.0.10.35 syslog.estrada.co.id
+      tags: hosts
+
+    - name: Ensure command are recorded to log
+      blockinfile:
+        path: /etc/profile
+        block: | 
+          function log2syslog
+          {
+             declare COMMAND
+             COMMAND=$(fc -ln -0)
+             logger -p local1.notice -t bash -i -- "${USER}:${COMMAND}"
+          }
+          trap log2syslog DEBUG
+        insertbefore: 'unset i'
+      tags: profileconf
+
+    - name: Ensure rsyslog send log to ELK
+      lineinfile:
+        path: /etc/rsyslog.conf
+        state: present
+        line: local1.* @@syslog.estrada.co.id:5516
+      tags: rsyslogconf
+
+    - name: Ensure rsyslog config applied
+      service:
+        name: rsyslog
+        state: restarted
+      tags: rsyslogapp
